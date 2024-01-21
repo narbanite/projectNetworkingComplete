@@ -25,6 +25,13 @@
 #include <sys/socket.h>
 #include <stdint.h>
 
+/*our includes*/
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
 /*
  * Several useful constants
  */
@@ -35,6 +42,12 @@
 #define MICROTCP_INIT_CWND (3 * MICROTCP_MSS)
 #define MICROTCP_INIT_SSTHRESH MICROTCP_WIN_SIZE
 
+/*our defines*/
+#define ACK (0b1 << 12)
+#define RST (0b1 << 13)
+#define SYN (0b1 << 14)
+#define FIN (0b1 << 15)
+
 /**
  * Possible states of the microTCP socket
  *
@@ -43,6 +56,7 @@
  */
 typedef enum
 {
+  INIT,     /*our state, used for initialization of the socket because we won't know if the socket represents the server or the client when it's created*/
   LISTEN,
   ESTABLISHED,
   CLOSING_BY_PEER,
@@ -82,6 +96,10 @@ typedef struct
   uint64_t bytes_send;
   uint64_t bytes_received;
   uint64_t bytes_lost;
+
+  /*our fields*/
+  const struct sockaddr *myaddr;
+  const struct sockaddr *destaddr;
 } microtcp_sock_t;
 
 
@@ -101,6 +119,13 @@ typedef struct
   uint32_t future_use2;         /**< 32-bits for future use */
   uint32_t checksum;            /**< CRC-32 checksum, see crc32() in utils folder */
 } microtcp_header_t;
+
+
+/*our vars*/
+typedef struct{
+  microtcp_header_t header;
+  int buffer[MICROTCP_RECVBUF_LEN];
+} message_t;
 
 
 microtcp_sock_t
@@ -136,6 +161,10 @@ microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t length,
 
 ssize_t
 microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int flags);
+
+/*our functions*/
+void initialize_message(message_t message);
+
 
 
 #endif /* LIB_MICROTCP_H_ */
