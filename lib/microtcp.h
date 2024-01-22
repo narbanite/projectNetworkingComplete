@@ -124,7 +124,7 @@ typedef struct
 /*our vars*/
 typedef struct{
   microtcp_header_t header;
-  int buffer[MICROTCP_RECVBUF_LEN];
+  void *data;
 } message_t;
 
 
@@ -162,9 +162,7 @@ microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t length,
 ssize_t
 microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int flags);
 
-/*our functions*/
-void initialize_message(message_t message);
-
-
-
 #endif /* LIB_MICROTCP_H_ */
+
+/*our functions*/
+size_t min3(size_t a, size_t b, size_t c);
