@@ -474,14 +474,14 @@ microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t length,
       sendmssg.header.ack_number = socket->ack_number;
       sendmssg.header.seq_number = socket->seq_number;
       sendmssg.header.window = MICROTCP_RECVBUF_LEN - socket->buf_fill_level;
+      sendmssg.header.data_len = bytes_to_send; //TODO FIND DATALEN !!!!!!!!!!!!!!!!!!!//////////////////////////////////////////////////
       sendmssg.data = data_per_chunk;
-      sendmssg.header.data_len = byts_to_send; //find
-      /*keep the seqience number of this chunk*/
+      /*keep the sequence number of this chunk*/
       chunk_seq_number[i] = socket->seq_number;
 
       /*making the error checking*/
       /*assuming that the buffer already has the header and the data ready to be sent on the buffer and has 0 on the CRC32 field of the header...*/
-      checksum = crc32(buffer, length);
+      checksum = crc32(sendmssg, sizeof(sendmssg));
       sendmssg.header.checksum = checksum;
       
       bytes_sent = sendto(socket->sd, &sendmssg, bytes_to_send, flags, socket->destaddr, dest_len);
@@ -499,8 +499,7 @@ microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t length,
       total_bytes_sent += bytes_sent;
       socket->packets_send++;
       socket->seq_number += bytes_sent;
-      //LOGIKA to window allazei mono sto receive kai edw den xreiazetai na peira3oume kapoia allh plhroforia tou socket
-      //revisit this an den einai etsi
+      socket->curr_win_size += bytes_sent;
 
       /*we have sent the first bytes_sent bytes of data*/
       temp = (temp + sendmssg.header.data_len);
@@ -540,8 +539,7 @@ microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t length,
       total_bytes_sent += bytes_sent;
       socket->packets_send++;
       socket->seq_number += bytes_sent;
-      //LOGIKA to window allazei mono sto receive kai edw den xreiazetai na peira3oume kapoia allh plhroforia tou socket
-      //revisit this an den einai etsi
+      socket->curr_win_size += bytes_sent;
 
       /*we have sent the first bytes_sent bytes of data*/
       temp = (temp + sendmssg.header.data_len);
@@ -561,20 +559,50 @@ microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t length,
         }
       }
 
-      memcpy(&recvmssg, temp, MICROTCP_RECVBUF_LEN - socket->buf_fill_level);
-      socket->curr_win_size = recvmssg.header.window;
+      memcpy(&recvmssg, temp, sizeof(recvmssg));
+      socket->curr_win_size -= recvmssg.header.data_len;
       socket->recvbuf = recvmssg.data;
+      socket->buf_fill_level += recvmssg.header.data_len;
 
-      if(recvmssg.header.ack_number == prev_ack){
-        dupACKs++;
-      } else if (recvmssg.header.ack_number != prev_ack && dupACKs > 0){
-        dupACKs = 0;
-      }
+      if(recvmssg.header.window == 0){
+        while(1){
+          //wait a rand ammount of time
+          memset(&sendmssg, 0, sizeof(sendmssg));
+          sendmssg.header.ack_number = socket->ack_number;
+          sendmssg.header.control = ACK;
+          sendmssg.header.data_len = 0;
 
-      if(dupACKs==2){
-        fprintf(stderr, "3 duplicate ACKs occured, retransmit missing package");
-        //IN case of 3 DUP ACKs TODO retransmission
-        dupACKs = 0;
+          sleep(1);
+          printf("Sending special package with 0 payload\n");
+          if (sendto(socket->sd, sendmssg, sizeof(sendmssg), 0, socket->destaddr, dest_len) == -1)
+          {
+            printf("Error in sending the message to client\n");
+            fprintf(stderr, "Error: %s\n", strerror(errno));
+            return -1;
+          }
+
+          if(recvfrom(socket->sd, (void *restrict)temp, MICROTCP_RECVBUF_LEN - socket->buf_fill_level, flags, (struct sockaddr *restrict)src_address, (socklen_t *restrict)&src_len)==-1){
+            printf("Error in receiving the message in socket <%d>\n", socket->sd);
+            fprintf(stderr, "Error: %s\n", strerror(errno));
+            return -1;
+          }
+          memcpy(&recvmssg, temp, sizeof(recvmssg));
+          if(recvmssg.header.window!=0) break;
+        }
+        //retransmit
+        break;
+      } else {
+        if(recvmssg.header.ack_number == prev_ack){
+          dupACKs++;
+        } else if (recvmssg.header.ack_number != prev_ack && dupACKs > 0){
+          dupACKs = 0;
+        }
+
+        if(dupACKs==3){
+          fprintf(stderr, "3 duplicate ACKs occured, retransmit missing package");
+          //IN case of 3 DUP ACKs TODO retransmission
+          dupACKs = 0;
+        }
       }
 
       prev_ack = recvmssg.header.ack_number;
@@ -601,6 +629,7 @@ microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int flags)
 
   message_t *recvmssg = malloc(sizeof(message_t));
   message_t *sendmssg = malloc(sizeof(message_t));
+  uint32_t receivedChecksum, calculatedChecksum;
   int total_bytes_received=0;
 
   /*set the receive timeout time with the code given*/
@@ -613,59 +642,98 @@ microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int flags)
 
   memset(recvmssg, 0, sizeof(recvmssg));
   memset(sendmssg, 0, sizeof(sendmssg));
+  memset(&receivedChecksum, 0, sizeof(receivedChecksum));
+  memset(&calculatedChecksum, 0, sizeof(calculatedChecksum));
 
-  while(total_bytes_received < length){
-    int bytes_received = recvfrom(socket->sd, (void *restrict)buffer, length, flags, (struct sockaddr *restrict)src_address, (socklen_t *restrict)&src_len);
-    if (bytes_received == -1)
-    {
-      printf("Error in receiving the message in socket <%d>\n", socket->sd);
-      fprintf(stderr, "Error: %s\n", strerror(errno));
-      return -1;
-    }
+  /*receive the message*/
 
-    memcpy(recvmssg, buffer, sizeof(message_t));
-
-    socket->bytes_received += bytes_received;
-    total_bytes_received += bytes_received;
-    socket->packets_received++;
-
-    if(mssg->header.seq_number == socket->ack_number){
-      /*everything good, i got the correct package*/
-      memccpy(socket->recvbuf, recvmssg, bytes_received);
-      socket->buf_fill_level += bytes_received;
-      
-      sendmssg->header.ack_number = recvmssg->header.seq_number + recvmssg->header.data_len;
-      socket->ack_number = recvmssg->header.ack_number;
-      server_mssg->header.control = ACK
+  int bytes_received = recvfrom(socket->sd, (void *restrict)buffer, length, flags, (struct sockaddr *restrict)src_address, (socklen_t *restrict)&src_len);
+  if (bytes_received == -1)
+  {
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      fprintf(stderr, "Receive timeout occurred\n");
+      /*send dupACK*/
+      sendmssg->header.ack_number = socket->ack_number;
+      sendmssg->header.control = ACK
 
       sleep(1);
-      printf("Sending ACK, ack=%d\n", server_mssg->header.ack_number);
-      if (sendto(socket->sd, server_mssg, MICROTCP_RECVBUF_LEN, 0, socket->destaddr, cl_len) == -1)
+      printf("Sending dupACK, ack=%d\n", sendmssg->header.ack_number);
+      if (sendto(socket->sd, sendmssg, MICROTCP_RECVBUF_LEN, 0, socket->destaddr, cl_len) == -1)
       {
         printf("Error in sending the message to client\n");
         fprintf(stderr, "Error: %s\n", strerror(errno));
         return -1;
       }
     } else {
-      /*i got the wrong package*/
-      server_mssg->header.ack_number = socket->seq_number + 1;
-      socket->ack_number = server_mssg->header.ack_number;
-      server_mssg->header.control = ACK
-
-      sleep(1);
-      printf("Sending ACK, ack=%d\n", server_mssg->header.ack_number);
-      if (sendto(socket->sd, server_mssg, MICROTCP_RECVBUF_LEN, 0, socket->destaddr, cl_len) == -1)
-      {
-        printf("Error in sending the message to client\n");
-        fprintf(stderr, "Error: %s\n", strerror(errno));
-        return -1;
-      }
+      printf("Error in receiving the message in socket <%d>\n", socket->sd);
+      fprintf(stderr, "Error: %s\n", strerror(errno));
+      return -1;
     }
+  }
 
+  memcpy(recvmssg, buffer, sizeof(recvmssg));
 
+  /*checksum*/
+  receivedChecksum = recvmssg->header.checksum;
+  recvmssg->header.checksum = 0;
+  calculatedChecksum = crc32(recvmssg, sizeof(recvmssg));
 
-    if (mssg->header.control == (FIN|ACK)){
-      socket->state = CLOSING_BY_PEER;
+  if(receivedChecksum != calculatedChecksum){
+    fprintf(stderr, "Wrong checksum, package corrupted\n");
+    sendmssg->header.ack_number = socket->ack_number;
+    sendmssg->header.control = ACK;
+
+    sleep(1);
+    printf("Sending dupACK, ack=%d\n", sendmssg->header.ack_number);
+    if (sendto(socket->sd, sendmssg, sizeof(sendmssg), 0, socket->destaddr, dest_len) == -1)
+    {
+      printf("Error in sending the message to client\n");
+      fprintf(stderr, "Error: %s\n", strerror(errno));
+      return -1;
+    }
+  }
+
+  socket->bytes_received += bytes_received;
+  total_bytes_received += bytes_received;
+  socket->packets_received++;
+
+  if (recvmssg->header.control == (FIN|ACK)){
+    socket->state = CLOSING_BY_PEER;
+    /*call shutdown*/
+    return -1;
+  }
+
+  if(recvmssg->header.seq_number == socket->ack_number){
+    /*everything good, i got the correct package*/
+    memcpy(socket->recvbuf, recvmssg->data, recvmssg->header.data_len);
+    socket->buf_fill_level += recvmssg->header.data_len;
+    
+    sendmssg->header.ack_number = recvmssg->header.seq_number + recvmssg->header.data_len;
+    socket->ack_number = sendmssg->header.ack_number;
+    sendmssg->header.window -= recvmssg->header.data_len;
+    socket->curr_win_size -= recvmssg->header.data_len;
+    sendmssg->header.control = ACK;
+    //peira3e to seq number an xreiazetai
+
+    sleep(1);
+    printf("Sending ACK, ack=%d\n", sendmssg->header.ack_number);
+    if (sendto(socket->sd, sendmssg, sizeof(sendmssg), 0, socket->destaddr, dest_len) == -1)
+    {
+      printf("Error in sending the message to client\n");
+      fprintf(stderr, "Error: %s\n", strerror(errno));
+      return -1;
+    }
+  } else {
+    /*i got the wrong package*/
+    sendmssg->header.ack_number = socket->ack_number;
+    sendmssg->header.control = ACK;
+
+    sleep(1);
+    printf("Sending dupACK, ack=%d\n", sendmssg->header.ack_number);
+    if (sendto(socket->sd, sendmssg, sizeof(sendmssg), 0, socket->destaddr, dest_len) == -1)
+    {
+      printf("Error in sending the message to client\n");
+      fprintf(stderr, "Error: %s\n", strerror(errno));
       return -1;
     }
   }
