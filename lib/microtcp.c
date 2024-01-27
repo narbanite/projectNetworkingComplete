@@ -44,25 +44,6 @@ microtcp_socket (int domain, int type, int protocol)
   mysocket.sd = sock;
   mysocket.state = INIT;
 
-  // mysocket.sd = sock;
-  // mysocket.state = INIT;
-  // mysocket.init_win_size = MICROTCP_WIN_SIZE;
-  // mysocket.curr_win_size = mysocket.init_win_size;
-  // mysocket.recvbuf = malloc(MICROTCP_RECVBUF_LEN);
-  // mysocket.buf_fill_level = 0;
-  // mysocket.cwnd = MICROTCP_INIT_CWND;
-  // mysocket.ssthresh = MICROTCP_INIT_SSTHRESH;
-  // mysocket.seq_number = 0; /**< Keep the state of the sequence number */
-  // mysocket.ack_number = 0; /**< Keep the state of the ack number */
-  // memset(&mysocket.packets_send, 0, sizeof(mysocket.packets_send));
-  // memset(&mysocket.packets_received, 0, sizeof(mysocket.packets_received));
-  // memset(&mysocket.packets_lost, 0, sizeof(mysocket.packets_lost));
-  // memset(&mysocket.bytes_send, 0, sizeof(mysocket.bytes_send));
-  // memset(&mysocket.bytes_received, 0, sizeof(mysocket.bytes_received));
-  // memset(&mysocket.bytes_lost, 0, sizeof(mysocket.bytes_lost));
-  // //memset(&mysocket.myaddr, 0, sizeof(struct sockaddr));
-  // //memset(&mysocket.destaddr, 0, sizeof(struct sockaddr));
-
   return mysocket;
 }
 
@@ -113,11 +94,13 @@ microtcp_connect (microtcp_sock_t *socket, const struct sockaddr *address,
 
   printf("Sending SYN, seq=%d, win=%d\n", mssg->header.seq_number, mssg->header.window);
 
-  if (sendto(socket->sd, (const void *)mssg, MICROTCP_RECVBUF_LEN, 0, address, address_len) == -1)
+  if (sendto(socket->sd, (const void *)mssg, sizeof(mssg), 0, address, address_len) == -1)
   {
     printf("Error in sending the message from socket <%d>\n", socket->sd);
     return -1;
   }
+
+  printf("MESSAGE SENT\n");
 
   if (recvfrom(socket->sd, (void *restrict)rcv, MICROTCP_RECVBUF_LEN, 0, (struct sockaddr *restrict)address, (socklen_t *restrict)&address_len) == -1)
   {
@@ -178,12 +161,17 @@ microtcp_accept (microtcp_sock_t *socket, struct sockaddr *address,
   cl = address; /*here the server knows the address of the client, so we can initialize the global variable cl*/
   socket->destaddr = address; /*which is also its destinaton address*/
 
+  printf("WAITING TO ACCEPT\n");
+  //PROVLHMA STHN ACCEPT
+
   if (recvfrom(socket->sd, (void *restrict)rcv, MICROTCP_RECVBUF_LEN, 0, (struct sockaddr *restrict)address, (socklen_t *restrict)&address_len) == -1)
   {
     printf("Error in receiving the message in socket <%d>\n", socket->sd);
     fprintf(stderr, "Error: %s\n", strerror(errno));
     return -1;
   }
+
+  printf("MESSAGE RECEIVED\n");
 
   memcpy(mssg, rcv, sizeof(message_t));
 
@@ -266,7 +254,7 @@ microtcp_shutdown (microtcp_sock_t *socket, int how)
 
     server_mssg->header.ack_number = socket->seq_number + 1;
     socket->ack_number = server_mssg->header.ack_number;
-    server_mssg->header.control = ACK
+    server_mssg->header.control = ACK;
 
     sleep(1);
     printf("Sending ACK, ack=%d\n", server_mssg->header.ack_number);
@@ -481,10 +469,10 @@ microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t length,
 
       /*making the error checking*/
       /*assuming that the buffer already has the header and the data ready to be sent on the buffer and has 0 on the CRC32 field of the header...*/
-      checksum = crc32(sendmssg, sizeof(sendmssg));
+      checksum = crc32(sendmssg.data, bytes_to_send);
       sendmssg.header.checksum = checksum;
       
-      bytes_sent = sendto(socket->sd, &sendmssg, bytes_to_send, flags, socket->destaddr, dest_len);
+      bytes_sent = sendto(socket->sd, &sendmssg, sizeof(sendmssg), flags, socket->destaddr, dest_len);
       if (bytes_sent == -1)
       {
         printf("Error in sending the message to server\n");
@@ -574,7 +562,7 @@ microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t length,
 
           sleep(1);
           printf("Sending special package with 0 payload\n");
-          if (sendto(socket->sd, sendmssg, sizeof(sendmssg), 0, socket->destaddr, dest_len) == -1)
+          if (sendto(socket->sd, &sendmssg, sizeof(sendmssg), 0, socket->destaddr, dest_len) == -1)
           {
             printf("Error in sending the message to client\n");
             fprintf(stderr, "Error: %s\n", strerror(errno));
@@ -654,7 +642,7 @@ microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int flags)
       fprintf(stderr, "Receive timeout occurred\n");
       /*send dupACK*/
       sendmssg->header.ack_number = socket->ack_number;
-      sendmssg->header.control = ACK
+      sendmssg->header.control = ACK;
 
       sleep(1);
       printf("Sending dupACK, ack=%d\n", sendmssg->header.ack_number);
@@ -676,7 +664,7 @@ microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int flags)
   /*checksum*/
   receivedChecksum = recvmssg->header.checksum;
   recvmssg->header.checksum = 0;
-  calculatedChecksum = crc32(recvmssg, sizeof(recvmssg));
+  calculatedChecksum = crc32(recvmssg->data, recvmssg->header.data_len);
 
   if(receivedChecksum != calculatedChecksum){
     fprintf(stderr, "Wrong checksum, package corrupted\n");
@@ -685,7 +673,7 @@ microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int flags)
 
     sleep(1);
     printf("Sending dupACK, ack=%d\n", sendmssg->header.ack_number);
-    if (sendto(socket->sd, sendmssg, sizeof(sendmssg), 0, socket->destaddr, dest_len) == -1)
+    if (sendto(socket->sd, sendmssg, sizeof(sendmssg), 0, socket->destaddr, sizeof(struct sockaddr_in)) == -1)
     {
       printf("Error in sending the message to client\n");
       fprintf(stderr, "Error: %s\n", strerror(errno));
@@ -717,7 +705,7 @@ microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int flags)
 
     sleep(1);
     printf("Sending ACK, ack=%d\n", sendmssg->header.ack_number);
-    if (sendto(socket->sd, sendmssg, sizeof(sendmssg), 0, socket->destaddr, dest_len) == -1)
+    if (sendto(socket->sd, sendmssg, sizeof(sendmssg), 0, socket->destaddr, sizeof(struct sockaddr_in)) == -1)
     {
       printf("Error in sending the message to client\n");
       fprintf(stderr, "Error: %s\n", strerror(errno));
@@ -730,7 +718,7 @@ microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int flags)
 
     sleep(1);
     printf("Sending dupACK, ack=%d\n", sendmssg->header.ack_number);
-    if (sendto(socket->sd, sendmssg, sizeof(sendmssg), 0, socket->destaddr, dest_len) == -1)
+    if (sendto(socket->sd, sendmssg, sizeof(sendmssg), 0, socket->destaddr, sizeof(struct sockaddr_in)) == -1)
     {
       printf("Error in sending the message to client\n");
       fprintf(stderr, "Error: %s\n", strerror(errno));
@@ -746,8 +734,8 @@ microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int flags)
 //an to state einai closing by peer kalei thn shut down.
 
 /*our functions*/
-int min3(int a, int b, int c){
-  int min = a;
+size_t min3(size_t a, size_t b, size_t c){
+  size_t min = a;
 
   if(b<min) min = b;
   if(c<min) min = c;
