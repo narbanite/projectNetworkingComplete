@@ -380,7 +380,7 @@ client_microtcp (const char *serverip, uint16_t server_port, const char *file)
   /*Port that server listens at */
   sin.sin_port = htons (server_port);
   /* The server's IP*/
-  sin.sin_addr.s_addr = htonl(serverip);  //isws to alla3oume
+  sin.sin_addr.s_addr = inet_addr (serverip);
 
   printf("Socket opened\n");
 
@@ -393,6 +393,7 @@ client_microtcp (const char *serverip, uint16_t server_port, const char *file)
 
   printf ("Starting sending data...\n");
   /* Start sending the data */
+  int c = 0;
   while (!feof (fp)) {
     read_items = fread (buffer, sizeof(uint8_t), CHUNK_SIZE, fp);
     if (read_items < 1) {
@@ -403,6 +404,8 @@ client_microtcp (const char *serverip, uint16_t server_port, const char *file)
       fclose (fp);
       return -EXIT_FAILURE;
     }
+
+    printf("SENDING CHUNK %d\n", c++);
 
     data_sent = microtcp_send (&sock, buffer, read_items * sizeof(uint8_t), 0);
     if (data_sent != read_items * sizeof(uint8_t)) {
