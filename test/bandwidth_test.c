@@ -421,19 +421,6 @@ client_microtcp (const char *serverip, uint16_t server_port, const char *file)
   }
 
   printf ("Data sent. Terminating...\n");
-  
-  /*send FIN ACK and then shutdown*/
-  message_t sendmssg;
-  memset(&sendmssg, 0, sizeof(sendmssg));
-
-  sendmssg.header.control = FIN | ACK;
-  sendmssg.header.ack_number = sock.ack_number;
-  
-  if (sendto(sock.sd, &sendmssg, sizeof(sendmssg), 0, sock.destaddr, sizeof(struct sockaddr_in)) == -1){
-    printf("Error in sending FIN ACK\n");
-    fprintf(stderr, "Error: %s\n", strerror(errno));
-    return -1;
-  }
 
   microtcp_shutdown (&sock, SHUT_RDWR);
   close (sock.sd);
