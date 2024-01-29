@@ -251,10 +251,9 @@ microtcp_shutdown (microtcp_sock_t *socket, int how)
       return -1;
     }
 
-    //sleep(1);
     printf("Server's state changed to CLOSING_BY_PEER\n");
 
-    // TODO: SEND ANYTHING LEFT
+    // SEND ANYTHING LEFT
 
     /*sequence nuumber is the next byte after sending anything left*/
     socket->seq_number = socket->seq_number + 1;
@@ -334,7 +333,6 @@ microtcp_shutdown (microtcp_sock_t *socket, int how)
     printf("Received ACK\n");
 
     /*since the client does not send any other message now, we won't change the message information (seq and ack number, control)*/
-    //TODO complete the shutdown to send anything left
     socket->ack_number = client_mssg->header.seq_number + 1;
     socket->seq_number = socket->seq_number + 1;
 
@@ -378,6 +376,10 @@ microtcp_shutdown (microtcp_sock_t *socket, int how)
 
 }
 
+
+/*retransmition logic: Prepei na 3anasteiloume ta paketa apo to last ACKed paketo kai meta apo to ka8e batch dedomenwn ths while loop
+ *Gia na to kanoume auto 3anastelnoume ta paketa kai meta peirazoume to i ths for pou xrhsimopoioume gia na lavoume ta ACKs katallhla wste sthn epomenh epanalhpsh tou
+ *na perimenei pali gia to swsto ACK*/
 ssize_t
 microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t length,
                int flags)
@@ -400,7 +402,9 @@ microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t length,
   int bytes_received;
   message_t recvmssg;
   size_t *chunk_seq_number;
+  size_t *bytes_per_chunk;
   size_t prev_ack;
+  bool ret = false; /*boolean to check for retransmits*/
   
   /*initializations*/
   memset(&sendmssg, 0, sizeof(sendmssg));
@@ -410,7 +414,7 @@ microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t length,
   memset(&bytes_to_send, 0, sizeof(bytes_to_send));
   memset(&data_sent, 0, sizeof(data_sent));
   memset(&recvmssg, 0, sizeof(recvmssg));
-  memset(&prev_ack, 0, sizeof(prev_ack));
+  prev_ack = socket->ack_number;
 
   memcpy(temp, buffer, length);
 
@@ -422,15 +426,15 @@ microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t length,
     perror(" setsockopt");
   }
 
-
   /*devide into chunks and send*/
 
   remaining = length;
   while(data_sent < length){
-
+    
     bytes_to_send = min3(socket->curr_win_size, socket->cwnd, remaining);
     chunks = bytes_to_send/MICROTCP_MSS;
     chunk_seq_number = malloc(chunks*sizeof(size_t));
+    bytes_per_chunk = malloc(chunks*sizeof(size_t));
 
     printf("bytes to send: %d\nchunks=%d\n", bytes_to_send, chunks);
 
@@ -447,6 +451,7 @@ microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t length,
       sendmssg.data = data_per_chunk;
       /*keep the sequence number of this chunk*/
       chunk_seq_number[i] = socket->seq_number;
+      bytes_per_chunk[i] = bytes_to_send;
 
       /*compute checksum*/
       /*assuming that the buffer already has the header and the data ready to be sent on the buffer and has 0 on the CRC32 field of the header...*/
@@ -479,9 +484,10 @@ microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t length,
       printf("INSIDE THE UNFILLED CHUNK: %d\n", bytes_to_send % MICROTCP_MSS);
       chunks++;
       chunk_seq_number = realloc(chunk_seq_number, chunks*sizeof(size_t));
+      bytes_per_chunk = realloc(bytes_per_chunk, chunks*sizeof(size_t));
 
-      memcpy(data_per_chunk, temp, length);
-      printf("sizeof(*data_per_chunk)=%d\n", sizeof(*data_per_chunk));
+      memcpy(data_per_chunk, temp, bytes_to_send % MICROTCP_MSS);
+      //printf("sizeof(*data_per_chunk)=%d\n", sizeof(*data_per_chunk));
       
       /*make header*/
       sendmssg.header.control = ACK;
@@ -491,6 +497,7 @@ microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t length,
       sendmssg.data = data_per_chunk;
       sendmssg.header.data_len = sizeof(*data_per_chunk);
       chunk_seq_number[chunks-1] = socket->seq_number;
+      bytes_per_chunk[chunks-1] = bytes_to_send % MICROTCP_MSS;
 
       /*compute checksum*/
       /*assuming that the buffer already has the header and the data ready to be sent on the buffer and has 0 on the CRC32 field of the header...*/
@@ -533,7 +540,38 @@ microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t length,
           fprintf(stderr, "Receive timeout occurred\n");
           socket->ssthresh = socket->cwnd/2;
           socket->cwnd = min(MICROTCP_MSS,socket->ssthresh);
-          //TODO retransmission
+          
+          /*retransmit*/
+          int k;
+          /*for each packet after the one that i have to retransmit (including the packet that caused the retransmition)...*/
+          for(k=i; k<chunks; k++){
+            /*make header*/
+            sendmssg.header.control = ACK;
+            sendmssg.header.ack_number = socket->ack_number;
+            sendmssg.header.seq_number = chunk_seq_number[k];
+            sendmssg.header.window = MICROTCP_RECVBUF_LEN - socket->buf_fill_level;
+            memcpy(sendmssg.data, (buffer + recvmssg.header.ack_number), bytes_per_chunk[k]);
+            sendmssg.header.data_len = sizeof(*data_per_chunk);
+
+            /*compute checksum*/
+            /*assuming that the buffer already has the header and the data ready to be sent on the buffer and has 0 on the CRC32 field of the header...*/
+            checksum = crc32(&sendmssg, sizeof(message_t));
+            sendmssg.header.checksum = checksum;
+            
+            bytes_sent = sendto(socket->sd, &sendmssg, sizeof(message_t), flags, socket->destaddr, dest_len);
+            if (bytes_sent == -1)
+            {
+              printf("Error in sending the message to server\n");
+              fprintf(stderr, "Error: %s\n", strerror(errno));
+              socket->packets_lost++;
+              socket->bytes_lost += bytes_to_send;
+              return -1;
+            }
+          }
+          /*decrease i so that in the next for loop it will remain the same as in this*/
+          i--;
+          prev_ack = recvmssg.header.ack_number;
+          continue;
         } else {
           printf("Error in receiving the message in socket <%d>\n", socket->sd);
           fprintf(stderr, "Error: %s\n", strerror(errno));
@@ -548,10 +586,15 @@ microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t length,
 
       if(recvmssg.header.window == 0){
         /*keep sending a special package with 0 payload until you receive an ACK with window!=0*/
-        while(1){
-          //TODO wait a rand ammount of time
+        while(recvmssg.header.window==0){
+          /*wait a rand ammount of time before sending the special package*/
+          srand((unsigned int)time(NULL));
+          unsigned int randomTime = rand() % (MICROTCP_ACK_TIMEOUT_US + 1);
+          usleep(randomTime);
+
           memset(&sendmssg, 0, sizeof(sendmssg));
           sendmssg.header.ack_number = socket->ack_number;
+          sendmssg.header.seq_number = recvmssg.header.ack_number;
           sendmssg.header.control = ACK;
           sendmssg.header.data_len = 0; /*payload=0*/
 
@@ -569,17 +612,43 @@ microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t length,
             return -1;
           }
           memcpy(&recvmssg, temp, sizeof(recvmssg));
-          
-          if(recvmssg.header.window!=0) break;
         }
-        //retransmit
-        break;
+        
+        /*retransmit*/
+        int k;
+        /*for each packet after the one that i have to retransmit (including the packet that caused the retransmition)...*/
+        for(k=i; k<chunks; k++){
+          /*make header*/
+          sendmssg.header.control = ACK;
+          sendmssg.header.ack_number = socket->ack_number;
+          sendmssg.header.seq_number = chunk_seq_number[k];
+          sendmssg.header.window = MICROTCP_RECVBUF_LEN - socket->buf_fill_level;
+          memcpy(sendmssg.data, (buffer + recvmssg.header.ack_number), bytes_per_chunk[k]);
+          sendmssg.header.data_len = sizeof(*data_per_chunk);
+
+          /*compute checksum*/
+          /*assuming that the buffer already has the header and the data ready to be sent on the buffer and has 0 on the CRC32 field of the header...*/
+          checksum = crc32(&sendmssg, sizeof(message_t));
+          sendmssg.header.checksum = checksum;
+          
+          bytes_sent = sendto(socket->sd, &sendmssg, sizeof(message_t), flags, socket->destaddr, dest_len);
+          if (bytes_sent == -1)
+          {
+            printf("Error in sending the message to server\n");
+            fprintf(stderr, "Error: %s\n", strerror(errno));
+            socket->packets_lost++;
+            socket->bytes_lost += bytes_to_send;
+            return -1;
+          }
+        }
+        /*decrease i so that in the next for loop it will remain the same as in this*/
+        i--;
+
       } else {
         /*congestion control*/
         if(recvmssg.header.ack_number == prev_ack){
           dupACKs++;
-        } else if (recvmssg.header.ack_number != prev_ack && dupACKs > 0) {
-          dupACKs = 0;
+        } else {
           if(socket->cwnd<=socket->ssthresh){
             /*slow start*/
             socket->cwnd + MICROTCP_MSS;
@@ -587,6 +656,8 @@ microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t length,
             /*congestion avoidance*/
             socket->cwnd += MICROTCP_MSS * (MICROTCP_MSS/socket->cwnd);
           }
+
+          if(dupACKs > 0) dupACKs = 0;
         }
 
         if(dupACKs==3){
@@ -594,16 +665,44 @@ microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t length,
           fprintf(stderr, "3 duplicate ACKs occured, retransmit missing package");
           socket->ssthresh = socket->cwnd/2;
           socket->cwnd = socket->cwnd/2 + 1;
-          //IN case of 3 DUP ACKs TODO retransmission
+
+          /*retransmit*/
+          int k;
+          /*for each packet after the one that i have to retransmit (including the packet that caused the retransmition)...*/
+          for(k=i; k<chunks; k++){
+            /*make header*/
+            sendmssg.header.control = ACK;
+            sendmssg.header.ack_number = socket->ack_number;
+            sendmssg.header.seq_number = chunk_seq_number[k];
+            sendmssg.header.window = MICROTCP_RECVBUF_LEN - socket->buf_fill_level;
+            memcpy(sendmssg.data, (buffer + recvmssg.header.ack_number), bytes_per_chunk[k]);
+            sendmssg.header.data_len = sizeof(*data_per_chunk);
+
+            /*compute checksum*/
+            /*assuming that the buffer already has the header and the data ready to be sent on the buffer and has 0 on the CRC32 field of the header...*/
+            checksum = crc32(&sendmssg, sizeof(message_t));
+            sendmssg.header.checksum = checksum;
+            
+            bytes_sent = sendto(socket->sd, &sendmssg, sizeof(message_t), flags, socket->destaddr, dest_len);
+            if (bytes_sent == -1)
+            {
+              printf("Error in sending the message to server\n");
+              fprintf(stderr, "Error: %s\n", strerror(errno));
+              socket->packets_lost++;
+              socket->bytes_lost += bytes_to_send;
+              return -1;
+            }
+          }
+          /*decrease i so that in the next for loop it will remain the same as in this*/
+          i--;
+
+          /*make dupACKs counter 0 since the retransmition is done and wait for the correct ACK*/
           dupACKs = 0;
         }
       }
 
       prev_ack = recvmssg.header.ack_number;
-
     }
-
-    // Retransmissions se periptwsh 3dACK 8a 3anakanoume memcpy sthn temp me starter point to buffer+ACKnumber gia remainig bytes.
 
     remaining -= bytes_to_send;
 
@@ -694,7 +793,6 @@ microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int flags)
     }
   } else {
     /*correct checksum*/
-
     socket->bytes_received += bytes_received;
     total_bytes_received += bytes_received;
     socket->packets_received++;
@@ -708,7 +806,7 @@ microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int flags)
 
     if(recvmssg->header.seq_number == socket->ack_number){
       /*everything good, i got the correct package*/
-      printf("trww seg edw\n");
+      //printf("trww seg edw\n");
       memcpy(socket->recvbuf, recvmssg->data, recvmssg->header.data_len);   //????????
       socket->buf_fill_level += recvmssg->header.data_len;
       
