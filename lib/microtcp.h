@@ -47,6 +47,7 @@
 #define RST (0b1 << 13)
 #define SYN (0b1 << 14)
 #define FIN (0b1 << 15)
+#define MIN(x, y) (((x) < (y)) ? (x) : (y))
 
 /**
  * Possible states of the microTCP socket

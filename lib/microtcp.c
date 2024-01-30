@@ -404,7 +404,6 @@ microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t length,
   size_t *chunk_seq_number;
   size_t *bytes_per_chunk;
   size_t prev_ack;
-  bool ret = false; /*boolean to check for retransmits*/
   
   /*initializations*/
   memset(&sendmssg, 0, sizeof(sendmssg));
@@ -539,7 +538,7 @@ microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t length,
           /*timeout*/
           fprintf(stderr, "Receive timeout occurred\n");
           socket->ssthresh = socket->cwnd/2;
-          socket->cwnd = min(MICROTCP_MSS,socket->ssthresh);
+          socket->cwnd = MIN(MICROTCP_MSS,socket->ssthresh);
           
           /*retransmit*/
           int k;
@@ -569,7 +568,7 @@ microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t length,
             }
           }
           /*decrease i so that in the next for loop it will remain the same as in this*/
-          i--;
+          //i--;  /*comment out to not get an endless loop because of segfault on the server*/
           prev_ack = recvmssg.header.ack_number;
           continue;
         } else {
